@@ -1,0 +1,98 @@
+- hosts: all
+  tasks:
+  - name: Update packages
+    apt: upgrade=dist update_cache=yes
+
+- hosts: mons
+  serial: 1
+  tasks:
+
+  - name: Restart ceph-mon service
+    service: >
+      name=ceph-mon-all
+      state=restarted
+
+  - name: Waiting for the monitor to join the quorum
+    shell: >
+      ceph -s | grep quorum | head -n1 | egrep -sq {{ ansible_hostname }}
+    register: result
+    until: result.rc == 0
+    retries: 5
+    delay: 10
+
+- hosts: osd 
+  serial: 1
+  tasks:
+
+  - name: Set OSD flag for pcie
+    command: ceph osd set {{ item }}
+    with_items:
+      - noout
+      - noscrub
+      - nodeep-scrub
+    delegate_to: ceph-mon-1
+
+  - name: Waiting for clean PGs pre restart
+    shell: >
+      test "$(ceph pg stat | sed 's/^.*pgs://;s/active+clean.*//;s/ //')" -eq "$(ceph pg stat | sed 's/pgs.*//;s/^.*://;s/ //')" && ceph health | egrep -sq "HEALTH_OK|HEALTH_WARN"
+    register: result
+    until: result.rc == 0
+    retries: 300
+    delay: 10
+    delegate_to: ceph-mon-1
+
+  - name: Restart OSD processes
+    service: >
+      name=ceph-osd-all
+      state=restarted
+
+  - name: Waiting for clean PGs post restart
+    shell: >
+      test "$(ceph pg stat | sed 's/^.*pgs://;s/active+clean.*//;s/ //')" -eq "$(ceph pg stat | sed 's/pgs.*//;s/^.*://;s/ //')" && ceph health | egrep -sq "HEALTH_OK|HEALTH_WARN"
+    register: result
+    until: result.rc == 0
+    retries: 300
+    delay: 10
+    delegate_to: ceph-mon-1
+
+  - name: UnSet OSD maintenance flags
+    command: ceph osd unset {{ item }}
+    with_items:
+      - noout
+      - noscrub
+      - nodeep-scrub
+    delegate_to: ceph-mon-1
+
+- hosts: radosgw
+  serial: 1
+  tasks:
+  - name: Restart rgw service after upgrade
+    service: >
+      name=radosgw-all
+      state=restarted
+
+  - name : wait for the rgw service to be running
+    # TODO - replace this with a until: service status=running?
+    shell: >
+      pgrep radosgw
+    register: result
+    until: result.rc == 0
+    retries: 100
+    delay: 10
+
+- hosts: loadbalancers
+  serial: 1
+  tasks:
+  - name: Restart Load Balancers after the upgrade
+    service: >
+      name=haproxy
+      state=restarted
+
+  - name : wait for the haproxy service to be running
+    shell: >
+      pgrep haproxy
+    register: result
+    until: result.rc == 0
+    retries: 100
+    delay: 10
+
